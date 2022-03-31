@@ -63,6 +63,20 @@ func ProbeBandwidthManager() {
 		option.Config.EnableBandwidthManager = false
 		return
 	}
+	if option.Config.EnableBBR {
+		if h := probes.NewProbeManager().GetHelpers("sched_cls"); h != nil {
+			// We at least need 5.18 kernel for Pod-based BBR TCP congestion
+			// control since earlier kernels just clear the skb->tstamp upon
+			// netns traversal. See also:
+			//
+			// - https://lpc.events/event/11/contributions/953/
+			// - https://lore.kernel.org/bpf/20220302195519.3479274-1-kafai@fb.com/
+			if _, ok := h["bpf_skb_set_tstamp"]; !ok {
+				log.Fatalf("Cannot enable --%s, needs kernel 5.18 or newer.",
+					option.EnableBBR)
+			}
+		}
+	}
 }
 
 func InitBandwidthManager() {
@@ -81,7 +95,10 @@ func InitBandwidthManager() {
 	if _, err := bwmap.ThrottleMap.OpenOrCreate(); err != nil {
 		log.WithError(err).Fatal("Failed to access ThrottleMap")
 	}
-
+	congctl := "cubic"
+	if option.Config.EnableBBR {
+		congctl = "bbr"
+	}
 	type setting struct {
 		name string
 		val  string
@@ -91,10 +108,7 @@ func InitBandwidthManager() {
 		{"net.core.somaxconn", "4096"},
 		{"net.core.default_qdisc", "fq"},
 		{"net.ipv4.tcp_max_syn_backlog", "4096"},
-		// Temporary disable setting bbr for now until we have a
-		// kernel fix for pacing out of Pods as described in #15324.
-		// Then, kernels with the fix can use bbr, and others cubic.
-		{"net.ipv4.tcp_congestion_control", "cubic"},
+		{"net.ipv4.tcp_congestion_control", congctl},
 	}
 	for _, s := range baseSettings {
 		log.WithFields(logrus.Fields{
